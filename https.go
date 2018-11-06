@@ -34,6 +34,7 @@ var (
 	HTTPMitmConnect = &ConnectAction{Action: ConnectHTTPMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	RejectConnect   = &ConnectAction{Action: ConnectReject, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	httpsRegexp     = regexp.MustCompile(`^https:\/\/`)
+	certStore		= &sync.Map{}
 )
 
 type ConnectAction struct {
@@ -410,11 +411,22 @@ func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls
 	return func(host string, ctx *ProxyCtx) (*tls.Config, error) {
 		config := *defaultTLSConfig
 		ctx.Logf("signing for %s", stripPort(host))
-		cert, err := signHost(*ca, []string{stripPort(host)})
+
+		hostWithoutPort := stripPort(host)
+		if v, ok := certStore.Load(hostWithoutPort); ok {
+			if _, ok := v.(*tls.Certificate); ok {
+				return &config, nil
+			}
+		}
+
+		cert, err := signHost(*ca, []string{hostWithoutPort})
 		if err != nil {
 			ctx.Warnf("Cannot sign host certificate with provided CA: %s", err)
 			return nil, err
 		}
+
+		certStore.Store(hostWithoutPort, &cert)
+
 		config.Certificates = append(config.Certificates, cert)
 		return &config, nil
 	}
