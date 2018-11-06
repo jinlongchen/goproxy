@@ -3,6 +3,14 @@ package goproxy
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"io/ioutil"
+	"encoding/pem"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"fmt"
+	"bytes"
+	"io"
 )
 
 func init() {
@@ -109,3 +117,93 @@ cj/azKBaT04IOMLaN8xfSqitJYSraWMVNgGJM5vfcVaivZnNh0lZBv+qu6YkdM88
 -----END RSA PRIVATE KEY-----`)
 
 var GoproxyCa, goproxyCaErr = tls.X509KeyPair(CA_CERT, CA_KEY)
+
+func LoadCertificate(file string) (*tls.Certificate, error) {
+	raw, err := ioutil.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	var cert tls.Certificate
+	for {
+		block, rest := pem.Decode(raw)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			cert.Certificate = append(cert.Certificate, block.Bytes)
+		} else {
+			cert.PrivateKey, err = parsePrivateKey(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("failure reading private key from \"%s\": %s", file, err)
+			}
+		}
+		raw = rest
+	}
+
+	if len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("no certificate found in \"%s\"", file)
+	} else if cert.PrivateKey == nil {
+		return nil, fmt.Errorf("no private key found in \"%s\"", file)
+	}
+
+	return &cert, nil
+}
+
+func SaveCertificate(file string, ca *tls.Certificate) error {
+	// contains PEM-encoded data
+	var buf bytes.Buffer
+
+	// private
+	switch key := ca.PrivateKey.(type) {
+	case *ecdsa.PrivateKey:
+		if err := encodeECDSAKey(&buf, key); err != nil {
+			return err
+		}
+	case *rsa.PrivateKey:
+		b := x509.MarshalPKCS1PrivateKey(key)
+		pb := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: b}
+		if err := pem.Encode(&buf, pb); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("acme/autocert: unknown private key type %s", file)
+	}
+
+	// public
+	for _, b := range ca.Certificate {
+		pb := &pem.Block{Type: "CERTIFICATE", Bytes: b}
+		if err := pem.Encode(&buf, pb); err != nil {
+			return err
+		}
+	}
+
+	return ioutil.WriteFile(file, buf.Bytes(), 0644)
+}
+
+func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		switch key := key.(type) {
+		case *rsa.PrivateKey, *ecdsa.PrivateKey:
+			return key, nil
+		default:
+			return nil, fmt.Errorf("found unknown private key type in PKCS#8 wrapping")
+		}
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("failed to parse private key")
+}
+
+func encodeECDSAKey(w io.Writer, key *ecdsa.PrivateKey) error {
+	b, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return err
+	}
+	pb := &pem.Block{Type: "EC PRIVATE KEY", Bytes: b}
+	return pem.Encode(w, pb)
+}

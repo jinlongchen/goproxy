@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"path"
 )
 
 type ConnectActionLiteral int
@@ -33,8 +34,11 @@ var (
 	MitmConnect     = &ConnectAction{Action: ConnectMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	HTTPMitmConnect = &ConnectAction{Action: ConnectHTTPMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	RejectConnect   = &ConnectAction{Action: ConnectReject, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
-	httpsRegexp     = regexp.MustCompile(`^https:\/\/`)
-	certStore		= &sync.Map{}
+
+	CertsPath = "./certs/"
+
+	httpsRegexp = regexp.MustCompile(`^https:\/\/`)
+	certStore   = &sync.Map{}
 )
 
 type ConnectAction struct {
@@ -414,20 +418,36 @@ func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls
 
 		hostWithoutPort := stripPort(host)
 		if v, ok := certStore.Load(hostWithoutPort); ok {
-			if _, ok := v.(*tls.Certificate); ok {
+			if c, ok := v.(*tls.Certificate); ok {
+				ctx.Logf("loaded cert from memory %s", hostWithoutPort)
+				config.Certificates = append(config.Certificates, *c)
 				return &config, nil
 			}
 		}
+		ctx.Logf("CertsPath:%s", CertsPath)
+		file := path.Join(CertsPath, hostWithoutPort+".cer")
+		cert, err := LoadCertificate(file)
+		if cert != nil && err == nil {
+			ctx.Logf("loaded cert from disk:%s", file)
+			config.Certificates = append(config.Certificates, *cert)
+			return &config, nil
+		}
 
-		cert, err := signHost(*ca, []string{hostWithoutPort})
+		cert, err = signHost(*ca, []string{hostWithoutPort})
 		if err != nil {
 			ctx.Warnf("Cannot sign host certificate with provided CA: %s", err)
 			return nil, err
 		}
 
+		ctx.Logf("save cert to memory:%s", file)
 		certStore.Store(hostWithoutPort, &cert)
 
-		config.Certificates = append(config.Certificates, cert)
+		ctx.Logf("save cert to disk:%s", file)
+		err = SaveCertificate(file, cert)
+		if err != nil {
+			ctx.Warnf("cannot save CA: %s", err)
+		}
+		config.Certificates = append(config.Certificates, *cert)
 		return &config, nil
 	}
 }
